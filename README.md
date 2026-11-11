@@ -30,10 +30,15 @@ it when you are done.
 - **Colour terminal** — ANSI SGR rendering with 16, 256 and truecolour support,
   bold / dim / italic / underline / reverse / strikethrough. No external
   terminal library, no CDN.
-- **Keyboard input** (opt-in) — a `Type: on` toggle sends your keys to the real
-  pane through `tmux send-keys`: printable text, Enter, Backspace, Tab, Esc,
-  arrows, Home/End/PageUp/PageDown and Ctrl-a/c/d/e/k/l/r/u/z.
-  There is also a message bar and quick keys (⏎, Esc, Tab, ^C, ↑, ↓).
+- **Native keyboard input** — click the terminal (it focuses automatically) and
+  type directly into the real pane. Keystrokes travel over a WebSocket and are
+  written with `tmux send-keys`: printable text, Enter, Backspace, Tab/Shift-Tab,
+  Esc, Delete/Insert, Home/End/PageUp/PageDown, F1–F12, arrows and Ctrl
+  combinations. Paste is supported and the socket reconnects on its own.
+- **Server overview / management** — every pane on the host is grouped by tmux
+  session, with session/pane/attached counts, running command, geometry and
+  working directory. Open any terminal, close a pane, or kill a session from the
+  overview. All destructive actions ask for confirmation.
 - **Scrollback** — 120 / 400 / 800 / 2000 lines, autoscroll toggle, fullscreen.
 - **Terminate** — kill the pane's foreground process (`SIGTERM` or `SIGKILL`),
   close the pane, or kill the whole session. Every action asks for confirmation.
@@ -90,11 +95,13 @@ tmux-live/
 | GET | `/api/plugins/tmux-live/panes` | sessions, windows, panes |
 | GET | `/api/plugins/tmux-live/capture?target=session:0.0&lines=400&ansi=1` | pane contents with ANSI escapes |
 | POST | `/api/plugins/tmux-live/send` | `{target, text?}` or `{target, key?}` |
+| WS | `/api/plugins/tmux-live/ws?target=session:0.0` | direct input: `{text}` / `{key}` / `{type: "ping"}` |
 | POST | `/api/plugins/tmux-live/kill` | `{target, mode: process\|pane\|session, signal?}` |
 
 The frontend polls `capture` once a second while a pane is open and renders the
-SGR sequences itself. Nothing is bundled: React and the UI primitives come from
-the dashboard's plugin SDK, so the whole plugin is a few KB.
+SGR sequences itself. Keystrokes use the WebSocket for low latency; the HTTP
+`send` route remains available for scripts. Nothing is bundled: React and the UI
+primitives come from the dashboard's plugin SDK, so the whole plugin is a few KB.
 
 ## Security
 
@@ -104,7 +111,8 @@ sensitive surface it is.
 - Every tmux call is an argv list through `subprocess` — there is no shell.
 - Pane targets are validated with `^[A-Za-z0-9_][A-Za-z0-9_.:@%+-]{0,79}$`.
 - Writing is limited to literal text (control characters stripped) or a fixed
-  whitelist of key names. There is no command-execution endpoint.
+  whitelist of key names. The WebSocket validates its target and uses the same
+  whitelist; there is no command-execution endpoint.
 - `kill` accepts only `process` / `pane` / `session` and `TERM` / `KILL` / `INT`.
   The process is found from `#{pane_pid}` and its foreground process group
   (`tpgid` in `/proc/<pid>/stat`).
@@ -136,8 +144,9 @@ dashboard; `node --check` catches syntax errors. After editing
 
 ## Limitations
 
-- The view is a **mirror**: it refreshes once a second, so typed characters
-  appear on the next poll. It is not a PTY attachment.
+- The view is a **mirror**: input is sent immediately over the WebSocket, but
+  the screen refreshes once a second, so typed characters appear on the next
+  poll. It is not a PTY attachment.
 - Attaching a real PTY client was deliberately avoided: tmux resizes a window
   for every attached client, which would change the layout of the session you
   are watching.

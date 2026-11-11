@@ -1,9 +1,9 @@
 {
   "name": "tmux-live",
   "label": "Tmux",
-  "description": "Live tmux pane viewer: picker, colour terminal, keyboard input and process control.",
+  "description": "Live tmux pane viewer: server overview, colour terminal, direct keyboard input and process control.",
   "icon": "Terminal",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "tab": {
     "path": "/tmux",
     "position": "after:skills"

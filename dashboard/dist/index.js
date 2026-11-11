@@ -16,7 +16,7 @@
 
   const { React } = SDK;
   const h = React.createElement;
-  const { Card, CardContent, Badge, Button, Input, Select, SelectOption } = SDK.components;
+  const { Badge, Button, Select, SelectOption } = SDK.components;
   const { useState, useEffect, useRef, useCallback, useMemo } = SDK.hooks;
 
   const API = "/api/plugins/tmux-live";
@@ -36,17 +36,21 @@
       emptyServer: "El servidor tmux no está corriendo.",
       open: "Abrir terminal →",
       gridHint: "Elige un panel para verlo en grande, con color y teclado.",
+      overview: "Todos los terminales",
+      manageHint:
+        "Administra todos los paneles del host: abre uno para escribir en él, ciérralo o termina su sesión.",
+      sessions: (value) => value + (value === 1 ? " sesión" : " sesiones"),
+      panes: (value) => value + (value === 1 ? " panel" : " paneles"),
+      attached: (value) => value + (value === 1 ? " conectado" : " conectados"),
       back: "← Paneles",
       lines: (value) => value + " líneas",
       following: "Siguiendo",
       follow: "Seguir",
-      typeOn: "Escribir: sí",
-      typeOff: "Escribir: no",
       fullscreen: "Pantalla completa",
       focusHint: "Haz clic en la terminal para escribir",
-      typingHint: "Teclado activo — escribe sobre la terminal",
-      placeholder: "Mensaje al panel… (⏎ envía)",
-      send: "Enviar",
+      typingHint: "Teclado activo — escribe directamente sobre la terminal",
+      wsOn: "teclado en vivo",
+      wsConnecting: "conectando teclado…",
       terminate: "Terminar",
       killProcess: "Matar proceso",
       closePane: "Cerrar panel",
@@ -62,9 +66,8 @@
       notePane: "Se cierra el panel y su proceso.",
       noteSession: "Se cierran todos los paneles de la sesión.",
       footer:
-        "Se refresca cada segundo · los colores son los del panel · «Escribir» envía tus teclas al panel real",
+        "Se refresca cada segundo · los colores son los del panel · escribe directamente sobre la terminal",
       captureError: "no se pudo leer el panel",
-      sendError: "no se pudo enviar",
       killError: "no se pudo terminar el proceso",
       active: "activo",
     },
@@ -79,17 +82,21 @@
       emptyServer: "The tmux server is not running.",
       open: "Open terminal →",
       gridHint: "Pick a pane to see it large, in colour, with keyboard input.",
+      overview: "All terminals",
+      manageHint:
+        "Manage every pane on this host: open one to type in it, close it, or terminate its session.",
+      sessions: (value) => value + (value === 1 ? " session" : " sessions"),
+      panes: (value) => value + (value === 1 ? " pane" : " panes"),
+      attached: (value) => value + (value === 1 ? " attached" : " attached"),
       back: "← Panes",
       lines: (value) => value + " lines",
       following: "Following",
       follow: "Follow",
-      typeOn: "Type: on",
-      typeOff: "Type: off",
       fullscreen: "Fullscreen",
       focusHint: "Click the terminal to type",
-      typingHint: "Keyboard active — type into the terminal",
-      placeholder: "Message to the pane… (⏎ sends)",
-      send: "Send",
+      typingHint: "Keyboard active — type directly into the terminal",
+      wsOn: "keyboard live",
+      wsConnecting: "connecting keyboard…",
       terminate: "Terminate",
       killProcess: "Kill process",
       closePane: "Close pane",
@@ -105,9 +112,8 @@
       notePane: "The pane and its process are closed.",
       noteSession: "Every pane in the session is closed.",
       footer:
-        "Refreshes every second · colours come from the pane · «Type» sends your keys to the real pane",
+        "Refreshes every second · colours come from the pane · type directly into the terminal",
       captureError: "cannot read the pane",
-      sendError: "could not send",
       killError: "could not terminate the process",
       active: "active",
     },
@@ -118,15 +124,6 @@
   const BASE_COLORS = [
     "#1b1d23", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4",
     "#5c6370", "#ff7b86", "#b5e890", "#ffd68a", "#82c4ff", "#e0a0ff", "#7fe3ef", "#ffffff",
-  ];
-
-  const QUICK_KEYS = [
-    ["⏎", "Enter"],
-    ["Esc", "Escape"],
-    ["Tab", "Tab"],
-    ["^C", "C-c"],
-    ["↑", "Up"],
-    ["↓", "Down"],
   ];
 
   function readStore(key, fallback) {
@@ -328,14 +325,15 @@
     const [lines, setLines] = useState(() => readStore(STORE_LINES, "400"));
     const [updated, setUpdated] = useState(0);
 
-    const [typing, setTyping] = useState(false);
     const [focused, setFocused] = useState(false);
-    const [message, setMessage] = useState("");
     const [sendError, setSendError] = useState(null);
-    const [sending, setSending] = useState(false);
+    const [wsOnline, setWsOnline] = useState(false);
     const [pendingKill, setPendingKill] = useState(null);
     const [killError, setKillError] = useState(null);
     const [killing, setKilling] = useState(false);
+    const [managePending, setManagePending] = useState(null);
+    const [manageError, setManageError] = useState(null);
+    const [managing, setManaging] = useState(false);
 
     const viewRef = useRef(view);
     viewRef.current = view;
@@ -351,6 +349,8 @@
     const scrollRef = useRef(0);
     const bufferRef = useRef("");
     const flushTimer = useRef(null);
+    const socketRef = useRef(null);
+    const queueRef = useRef([]);
 
     const loadPanes = useCallback(async () => {
       try {
@@ -417,21 +417,83 @@
       else node.scrollTop = scrollRef.current;
     }, [html, follow]);
 
-    const send = useCallback(async (payload) => {
-      const current = targetRef.current;
-      if (!current) return false;
-      try {
-        await SDK.fetchJSON(API + "/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target: current, ...payload }),
-        });
+    useEffect(() => {
+      if (view !== "detail" || !target) return undefined;
+      let disposed = false;
+      let retryTimer = null;
+      let attempts = 0;
+
+      const connect = () => {
+        const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url =
+          scheme + "//" + window.location.host + API + "/ws?target=" + encodeURIComponent(target);
+        let socket;
+        try {
+          socket = new WebSocket(url);
+        } catch (err) {
+          setWsOnline(false);
+          return;
+        }
+        socketRef.current = socket;
+        socket.onopen = () => {
+          attempts = 0;
+          if (disposed) return;
+          setWsOnline(true);
+          setSendError(null);
+          const pending = queueRef.current;
+          queueRef.current = [];
+          pending.forEach((item) => socket.send(JSON.stringify(item)));
+        };
+        socket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data && data.type === "error" && data.detail) setSendError(data.detail);
+          } catch (err) {
+            /* non-JSON frames are ignored */
+          }
+        };
+        socket.onerror = () => {
+          if (!disposed) setWsOnline(false);
+        };
+        socket.onclose = () => {
+          if (socketRef.current === socket) socketRef.current = null;
+          if (disposed) return;
+          setWsOnline(false);
+          attempts += 1;
+          retryTimer = window.setTimeout(connect, Math.min(5000, 400 * attempts));
+        };
+      };
+
+      connect();
+      return () => {
+        disposed = true;
+        if (retryTimer) window.clearTimeout(retryTimer);
+        const socket = socketRef.current;
+        socketRef.current = null;
+        queueRef.current = [];
+        if (socket) socket.close();
+      };
+    }, [view, target]);
+
+    useEffect(() => {
+      if (view !== "detail" || !target) return undefined;
+      const timer = window.setTimeout(() => {
+        const node = screenRef.current;
+        if (node) node.focus();
+      }, 60);
+      return () => window.clearTimeout(timer);
+    }, [view, target]);
+
+    const send = useCallback((payload) => {
+      const socket = socketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload));
         setSendError(null);
         return true;
-      } catch (err) {
-        setSendError(err && err.message ? err.message : T.sendError);
-        return false;
       }
+      queueRef.current.push(payload);
+      if (queueRef.current.length > 200) queueRef.current.shift();
+      return false;
     }, []);
 
     const flushText = useCallback(() => {
@@ -445,37 +507,33 @@
     }, [send]);
 
     const openPane = useCallback((item) => {
+      if (flushTimer.current) {
+        window.clearTimeout(flushTimer.current);
+        flushTimer.current = null;
+      }
+      bufferRef.current = "";
+      queueRef.current = [];
       setTarget(item.target);
       setText("");
       setHash("");
       setMeta(null);
       setDetailError(null);
       setFollow(true);
-      setTyping(false);
-      setMessage("");
       setSendError(null);
+      setWsOnline(false);
       setPendingKill(null);
       setKillError(null);
+      setManagePending(null);
+      setManageError(null);
       scrollRef.current = 0;
       setView("detail");
     }, []);
 
     const backToGrid = useCallback(() => {
       flushText();
-      setTyping(false);
       setView("grid");
       loadPanes();
     }, [flushText, loadPanes]);
-
-    const submitMessage = useCallback(async () => {
-      const value = message;
-      if (!value.trim()) return;
-      setMessage("");
-      setSending(true);
-      const ok = await send({ text: value });
-      if (ok) await send({ key: "Enter" });
-      setSending(false);
-    }, [message, send]);
 
     const runKill = useCallback(
       async (mode, sig) => {
@@ -491,7 +549,6 @@
           });
           setKilling(false);
           setPendingKill(null);
-          setTyping(false);
           setView("grid");
           window.setTimeout(() => loadPanes(), 500);
         } catch (err) {
@@ -502,55 +559,66 @@
       [loadPanes],
     );
 
+    const runManageKill = useCallback(
+      async (mode, sig) => {
+        const job = managePending;
+        if (!job) return;
+        setManaging(true);
+        setManageError(null);
+        try {
+          await SDK.fetchJSON(API + "/kill", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: job.target, mode: mode, signal: sig || "TERM" }),
+          });
+          setManaging(false);
+          setManagePending(null);
+          await loadPanes();
+        } catch (err) {
+          setManaging(false);
+          setManageError(err && err.message ? err.message : T.killError);
+        }
+      },
+      [managePending, loadPanes],
+    );
+
     const onScreenKeyDown = useCallback(
       (event) => {
-        if (!typing) return;
-        if (event.metaKey || event.altKey) return;
-        if (event.ctrlKey) {
-          const map = {
-            a: "C-a",
-            c: "C-c",
-            d: "C-d",
-            e: "C-e",
-            k: "C-k",
-            l: "C-l",
-            r: "C-r",
-            u: "C-u",
-            z: "C-z",
+        if (event.isComposing || event.metaKey) return;
+
+        if (event.ctrlKey && !event.altKey) {
+          if (event.key === "v" || event.key === "V") return;
+          const special = {
+            " ": "C-Space",
+            "@": "C-@",
+            "[": "C-[",
+            "\\": "C-\\",
+            "]": "C-]",
+            "^": "C-^",
+            _: "C-_",
+            "?": "C-?",
+            ArrowUp: "C-Up",
+            ArrowDown: "C-Down",
+            ArrowLeft: "C-Left",
+            ArrowRight: "C-Right",
           };
-          const key = map[event.key.toLowerCase()];
-          if (key) {
-            event.preventDefault();
-            flushText();
-            send({ key: key });
-          }
-          return;
-        }
-        if (event.key === "Enter") {
+          const key = /^[a-zA-Z]$/.test(event.key)
+            ? "C-" + event.key.toLowerCase()
+            : special[event.key];
           event.preventDefault();
+          if (!key) return;
           flushText();
-          send({ key: "Enter" });
+          send({ key: key });
           return;
         }
-        if (event.key === "Backspace") {
-          event.preventDefault();
-          flushText();
-          send({ key: "BSpace" });
-          return;
-        }
-        if (event.key === "Tab") {
-          event.preventDefault();
-          flushText();
-          send({ key: event.shiftKey ? "BTab" : "Tab" });
-          return;
-        }
-        if (event.key === "Escape") {
-          event.preventDefault();
-          flushText();
-          send({ key: "Escape" });
-          return;
-        }
-        const arrows = {
+
+        if (event.altKey) return;
+
+        const named = {
+          Enter: "Enter",
+          Backspace: "BSpace",
+          Tab: event.shiftKey ? "BTab" : "Tab",
+          Escape: "Escape",
           ArrowUp: "Up",
           ArrowDown: "Down",
           ArrowLeft: "Left",
@@ -559,30 +627,45 @@
           End: "End",
           PageUp: "PageUp",
           PageDown: "PageDown",
+          Insert: "IC",
+          Delete: "DC",
+          F1: "F1",
+          F2: "F2",
+          F3: "F3",
+          F4: "F4",
+          F5: "F5",
+          F6: "F6",
+          F7: "F7",
+          F8: "F8",
+          F9: "F9",
+          F10: "F10",
+          F11: "F11",
+          F12: "F12",
         };
-        if (arrows[event.key]) {
+        if (named[event.key]) {
           event.preventDefault();
           flushText();
-          send({ key: arrows[event.key] });
+          send({ key: named[event.key] });
           return;
         }
+
         if (event.key.length === 1) {
           event.preventDefault();
           bufferRef.current += event.key;
-          if (!flushTimer.current) flushTimer.current = window.setTimeout(flushText, 80);
+          if (!flushTimer.current) flushTimer.current = window.setTimeout(flushText, 25);
         }
       },
-      [typing, flushText, send],
+      [flushText, send],
     );
 
     const onScreenPaste = useCallback(
       (event) => {
-        if (!typing) return;
         event.preventDefault();
         const pasted = (event.clipboardData || window.clipboardData).getData("text");
-        if (pasted) send({ text: pasted.replace(/\s+/g, " ").trim() });
+        const clean = pasted.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim();
+        if (clean) send({ text: clean });
       },
-      [typing, send],
+      [send],
     );
 
     const toggleFullscreen = useCallback(() => {
@@ -598,6 +681,28 @@
     /* ---------------------------------------------------------------- *
      * Grid
      * ---------------------------------------------------------------- */
+
+    const sessions = useMemo(() => {
+      const grouped = new Map();
+      panes.forEach((item) => {
+        if (!grouped.has(item.session)) {
+          grouped.set(item.session, {
+            name: item.session,
+            attached: false,
+            panes: [],
+          });
+        }
+        const session = grouped.get(item.session);
+        session.panes.push(item);
+        session.attached = session.attached || item.attached;
+      });
+      return Array.from(grouped.values()).sort((a, b) => a.name.localeCompare(b.name));
+    }, [panes]);
+
+    const attachedCount = useMemo(
+      () => new Set(panes.filter((item) => item.attached).map((item) => item.session)).size,
+      [panes],
+    );
 
     const grid =
       view !== "grid"
@@ -645,35 +750,146 @@
                     h("code", null, "tmux new -s demo"),
                   )
                 : h(
-                    "div",
-                    { className: "tmux-live-grid" },
-                    panes.map((item) =>
-                      h(
-                        "button",
-                        {
-                          key: item.target,
-                          type: "button",
-                          className: "tmux-live-card",
-                          onClick: () => openPane(item),
-                        },
-                        h(
-                          "span",
-                          { className: "tmux-live-card-head" },
+                    React.Fragment,
+                    null,
+                    h(
+                      "div",
+                      { className: "tmux-live-overview" },
+                      h("span", { className: "tmux-live-overview-title" }, T.overview),
+                      h("span", { className: "tmux-live-stat" }, T.sessions(sessions.length)),
+                      h("span", { className: "tmux-live-stat" }, T.panes(panes.length)),
+                      h("span", { className: "tmux-live-stat" }, T.attached(attachedCount)),
+                      h("span", { className: "tmux-live-overview-hint" }, T.manageHint),
+                    ),
+                    managePending
+                      ? h(
+                          "div",
+                          { className: "tmux-live-confirm" },
                           h(
                             "span",
-                            { className: "tmux-live-card-name" },
-                            h(Dot, { on: item.attached }),
-                            item.target,
+                            { className: "tmux-live-confirm-text" },
+                            managePending.mode === "pane" ? T.askPane : T.askSession,
+                            h("code", null, managePending.target),
+                            "?",
                           ),
-                          item.active ? h(Badge, { className: "tmux-live-badge" }, T.active) : null,
+                          h(
+                            Button,
+                            {
+                              size: "sm",
+                              onClick: () => runManageKill(managePending.mode),
+                              disabled: managing,
+                            },
+                            T.confirm,
+                          ),
+                          h(
+                            Button,
+                            {
+                              size: "sm",
+                              outlined: true,
+                              onClick: () => setManagePending(null),
+                              disabled: managing,
+                            },
+                            T.cancel,
+                          ),
+                          h(
+                            "span",
+                            { className: "tmux-live-confirm-note" },
+                            managePending.mode === "pane" ? T.notePane : T.noteSession,
+                          ),
+                        )
+                      : null,
+                    manageError
+                      ? h("div", { className: "tmux-live-error tmux-live-send-error" }, manageError)
+                      : null,
+                    h(
+                      "div",
+                      { className: "tmux-live-sessions" },
+                      sessions.map((session) =>
+                        h(
+                          "section",
+                          { key: session.name, className: "tmux-live-session" },
+                          h(
+                            "div",
+                            { className: "tmux-live-session-head" },
+                            h(
+                              "div",
+                              { className: "tmux-live-session-title" },
+                              h(Dot, { on: session.attached }),
+                              h("span", { className: "tmux-live-session-name" }, session.name),
+                              h("span", { className: "tmux-live-session-meta" }, T.panes(session.panes.length)),
+                            ),
+                            h(
+                              Button,
+                              {
+                                size: "sm",
+                                outlined: true,
+                                onClick: () => {
+                                  setManageError(null);
+                                  setManagePending({ target: session.name, mode: "session" });
+                                },
+                              },
+                              T.killSession,
+                            ),
+                          ),
+                          h(
+                            "div",
+                            { className: "tmux-live-grid" },
+                            session.panes.map((item) =>
+                              h(
+                                "div",
+                                { key: item.target, className: "tmux-live-card-wrap" },
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "tmux-live-card",
+                                    onClick: () => openPane(item),
+                                  },
+                                  h(
+                                    "span",
+                                    { className: "tmux-live-card-head" },
+                                    h(
+                                      "span",
+                                      { className: "tmux-live-card-name" },
+                                      h(Dot, { on: item.attached }),
+                                      item.target,
+                                    ),
+                                    item.active
+                                      ? h(Badge, { className: "tmux-live-badge" }, T.active)
+                                      : null,
+                                  ),
+                                  h(
+                                    "span",
+                                    { className: "tmux-live-card-meta" },
+                                    (item.command || "?") + " · " + item.size,
+                                  ),
+                                  h("span", { className: "tmux-live-card-path" }, shortPath(item.path)),
+                                  h("span", { className: "tmux-live-card-open" }, T.open),
+                                ),
+                                h(
+                                  "div",
+                                  { className: "tmux-live-card-actions" },
+                                  h(
+                                    Button,
+                                    {
+                                      size: "sm",
+                                      outlined: true,
+                                      onClick: () => {
+                                        setManageError(null);
+                                        setManagePending({ target: item.target, mode: "pane" });
+                                      },
+                                    },
+                                    T.closePane,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                        h("span", { className: "tmux-live-card-meta" }, (item.command || "?") + " · " + item.size),
-                        h("span", { className: "tmux-live-card-path" }, shortPath(item.path)),
-                        h("span", { className: "tmux-live-card-open" }, T.open),
                       ),
                     ),
+                    h("p", { className: "tmux-live-foot" }, T.gridHint),
                   ),
-            h("p", { className: "tmux-live-foot" }, T.gridHint),
           );
 
     /* ---------------------------------------------------------------- *
@@ -710,6 +926,12 @@
                   detailError ? T.error : updated ? new Date(updated).toLocaleTimeString() : "…",
                 ),
                 h(
+                  "span",
+                  { className: "tmux-live-live tmux-live-ws" },
+                  h(Dot, { on: wsOnline }),
+                  wsOnline ? T.wsOn : T.wsConnecting,
+                ),
+                h(
                   Select,
                   { value: lines, onValueChange: (value) => setLines(value) },
                   h(SelectOption, { value: "120" }, T.lines(120)),
@@ -722,11 +944,6 @@
                   { size: "sm", outlined: !follow, onClick: () => setFollow((value) => !value) },
                   follow ? T.following : T.follow,
                 ),
-                h(
-                  Button,
-                  { size: "sm", outlined: !typing, onClick: () => setTyping((value) => !value) },
-                  typing ? T.typeOn : T.typeOff,
-                ),
                 h(Button, { size: "sm", outlined: true, onClick: toggleFullscreen }, T.fullscreen),
               ),
             ),
@@ -738,11 +955,15 @@
                 ? h("div", { className: "tmux-live-error" }, detailError)
                 : h("pre", {
                     ref: screenRef,
-                    className: "tmux-live-screen" + (typing ? " is-typing" : ""),
+                    className: "tmux-live-screen is-typing",
                     tabIndex: 0,
                     spellCheck: false,
+                    "aria-label": T.typingHint,
                     onKeyDown: onScreenKeyDown,
                     onPaste: onScreenPaste,
+                    onClick: () => {
+                      if (screenRef.current) screenRef.current.focus();
+                    },
                     onFocus: () => setFocused(true),
                     onBlur: () => setFocused(false),
                     onScroll: (event) => {
@@ -750,47 +971,7 @@
                     },
                     dangerouslySetInnerHTML: { __html: html || "" },
                   }),
-              typing
-                ? h("span", { className: "tmux-live-keyhint" }, focused ? T.typingHint : T.focusHint)
-                : null,
-            ),
-
-            h(
-              "div",
-              { className: "tmux-live-send" },
-              h(Input, {
-                value: message,
-                placeholder: T.placeholder,
-                onChange: (event) => setMessage(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    submitMessage();
-                  }
-                },
-              }),
-              h(
-                Button,
-                { size: "sm", onClick: submitMessage, disabled: sending || !message.trim() },
-                T.send,
-              ),
-              h(
-                "span",
-                { className: "tmux-live-quick" },
-                QUICK_KEYS.map((pair) =>
-                  h(
-                    Button,
-                    {
-                      key: pair[1],
-                      size: "sm",
-                      outlined: true,
-                      onClick: () => send({ key: pair[1] }),
-                      title: pair[1],
-                    },
-                    pair[0],
-                  ),
-                ),
-              ),
+              !focused ? h("span", { className: "tmux-live-keyhint" }, T.focusHint) : null,
             ),
 
             h(

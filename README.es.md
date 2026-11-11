@@ -18,10 +18,15 @@ cuando termines.
 - **Terminal con color** — render ANSI SGR con 16, 256 y truecolor, además de
   negrita, tenue, cursiva, subrayado, reverse y tachado. Sin librerías externas
   ni CDN.
-- **Teclado opcional** — el botón `Escribir: sí` manda tus teclas al panel real
-  con `tmux send-keys`: texto, ⏎, Backspace, Tab, Esc, flechas,
-  Home/End/PageUp/PageDown y Ctrl-a/c/d/e/k/l/r/u/z. También hay barra de
-  mensaje y teclas rápidas (⏎, Esc, Tab, ^C, ↑, ↓).
+- **Teclado nativo** — haz clic en la terminal (recibe el foco sola) y escribe
+  directamente en el panel real. Las teclas viajan por WebSocket y se escriben
+  con `tmux send-keys`: texto, ⏎, Backspace, Tab/Shift-Tab, Esc, Delete/Insert,
+  Home/End/PageUp/PageDown, F1–F12, flechas y combinaciones con Ctrl. Se puede
+  pegar y el socket se reconecta solo.
+- **Vista general / administración** — todos los paneles del host agrupados por
+  sesión tmux, con contadores de sesiones/paneles/conectados, comando, tamaño y
+  directorio. Abre cualquier terminal, cierra un panel o mata una sesión desde
+  la vista general. Toda acción destructiva pide confirmación.
 - **Scrollback** — 120 / 400 / 800 / 2000 líneas, autoscroll y pantalla completa.
 - **Terminar** — matar el proceso en primer plano (`SIGTERM` o `SIGKILL`), cerrar
   el panel o matar la sesión completa. Todo con confirmación.
@@ -65,12 +70,14 @@ rm -rf ~/.hermes/plugins/tmux-live
 | GET | `/api/plugins/tmux-live/panes` | sesiones, ventanas y paneles |
 | GET | `/api/plugins/tmux-live/capture?target=sesion:0.0&lines=400&ansi=1` | contenido del panel con escapes ANSI |
 | POST | `/api/plugins/tmux-live/send` | `{target, text?}` o `{target, key?}` |
+| WS | `/api/plugins/tmux-live/ws?target=sesion:0.0` | entrada directa: `{text}` / `{key}` / `{type: "ping"}` |
 | POST | `/api/plugins/tmux-live/kill` | `{target, mode: process\|pane\|session, signal?}` |
 
 El frontend consulta `capture` una vez por segundo mientras hay un panel abierto
-y pinta las secuencias SGR él mismo. No se empaqueta nada: React y los
-componentes vienen del SDK de plugins del dashboard, así que el plugin pesa unos
-pocos KB.
+y pinta las secuencias SGR él mismo. El teclado usa el WebSocket para ir con
+poca latencia; la ruta HTTP `send` sigue disponible para scripts. No se
+empaqueta nada: React y los componentes vienen del SDK de plugins del dashboard,
+así que el plugin pesa unos pocos KB.
 
 ## Seguridad
 
@@ -81,7 +88,8 @@ superficie sensible que es.
   hay shell.
 - El `target` se valida con `^[A-Za-z0-9_][A-Za-z0-9_.:@%+-]{0,79}$`.
 - La escritura se limita a texto literal (sin caracteres de control) o a una
-  lista cerrada de teclas. No hay endpoint de ejecución de comandos.
+  lista cerrada de teclas. El WebSocket valida su `target` y usa la misma lista;
+  no hay endpoint de ejecución de comandos.
 - `kill` solo acepta `process` / `pane` / `session` y `TERM` / `KILL` / `INT`.
   El proceso se localiza por `#{pane_pid}` y su grupo en primer plano (`tpgid`
   en `/proc/<pid>/stat`).
@@ -113,8 +121,9 @@ dashboard; `node --check` detecta errores de sintaxis. Tras tocar
 
 ## Limitaciones
 
-- La vista es un **espejo**: se refresca cada segundo, así que lo que escribes
-  aparece en la siguiente consulta. No es un PTY adjunto.
+- La vista es un **espejo**: la entrada se envía al instante por WebSocket, pero
+  la pantalla se refresca cada segundo, así que lo que escribes aparece en la
+  siguiente consulta. No es un PTY adjunto.
 - Adjuntar un PTY real se evitó a propósito: tmux redimensiona la ventana para
   todos los clientes conectados, lo que cambiaría el layout de la sesión que
   estás mirando.

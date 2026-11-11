@@ -19,14 +19,16 @@ another same-user process) and caches the first socket tmux accepts.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import signal
 import subprocess
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -68,15 +70,20 @@ _ALLOWED_KEYS = {
     "PageDown",
     "DC",
     "IC",
-    "C-a",
-    "C-c",
-    "C-d",
-    "C-e",
-    "C-k",
-    "C-l",
-    "C-r",
-    "C-u",
-    "C-z",
+    "C-@",
+    "C-[",
+    "C-\\",
+    "C-]",
+    "C-^",
+    "C-_",
+    "C-?",
+    "C-Space",
+    "C-Up",
+    "C-Down",
+    "C-Left",
+    "C-Right",
+} | {f"C-{letter}" for letter in "abcdefghijklmnopqrstuvwxyz"} | {
+    f"F{number}" for number in range(1, 13)
 }
 
 _PANE_FORMAT = _FIELD.join(
@@ -384,20 +391,78 @@ def capture(
     }
 
 
+def _send_input(target: str, text: str | None = None, key: str | None = None) -> list[str]:
+    sent: list[str] = []
+    if text:
+        clean = _CONTROL_RE.sub("", text.replace("\r", "")).replace("\n", " ")[:_MAX_TEXT]
+        if clean:
+            _run(["send-keys", "-t", target, "-l", "--", clean])
+            sent.append("text")
+    if key:
+        if key not in _ALLOWED_KEYS:
+            raise HTTPException(status_code=400, detail="unsupported key")
+        _run(["send-keys", "-t", target, key])
+        sent.append(key)
+    if not sent:
+        raise HTTPException(status_code=400, detail="nothing to send")
+    return sent
+
+
 @router.post("/send")
 def send(body: _SendBody) -> dict:
     target = _check_target(body.target)
-    sent: list[str] = []
-    if body.text:
-        text = _CONTROL_RE.sub("", body.text.replace("\r", "")).replace("\n", " ")[:_MAX_TEXT]
-        if text:
-            _run(["send-keys", "-t", target, "-l", "--", text])
-            sent.append("text")
-    if body.key:
-        if body.key not in _ALLOWED_KEYS:
-            raise HTTPException(status_code=400, detail="unsupported key")
-        _run(["send-keys", "-t", target, body.key])
-        sent.append(body.key)
-    if not sent:
-        raise HTTPException(status_code=400, detail="nothing to send")
+    sent = _send_input(target, body.text, body.key)
     return {"ok": True, "sent": sent}
+
+
+@router.websocket("/ws")
+async def input_socket(websocket: WebSocket) -> None:
+    """Direct keyboard transport for the browser terminal.
+
+    The client sends ``{"text": "..."}`` for printable/pasted text and
+    ``{"key": "Enter"}`` for a key from the whitelist above. Capture still
+    travels over HTTP; only the low-latency input path uses this socket.
+    """
+    await websocket.accept()
+    try:
+        target = _check_target(websocket.query_params.get("target") or "")
+    except HTTPException as exc:
+        await websocket.send_json({"type": "error", "detail": exc.detail})
+        await websocket.close(code=1008)
+        return
+
+    await websocket.send_json({"type": "ready", "target": target})
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {"text": raw}
+            if not isinstance(payload, dict):
+                payload = {"text": str(payload)}
+
+            if payload.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            text = payload.get("text")
+            key = payload.get("key")
+            if text is None and payload.get("type") in (None, "input", "text"):
+                text = payload.get("data")
+            if text is not None and not isinstance(text, str):
+                await websocket.send_json({"type": "error", "detail": "text must be a string"})
+                continue
+            if key is not None and not isinstance(key, str):
+                await websocket.send_json({"type": "error", "detail": "key must be a string"})
+                continue
+            if not text and not key:
+                continue
+            try:
+                sent = await run_in_threadpool(_send_input, target, text, key)
+            except HTTPException as exc:
+                await websocket.send_json({"type": "error", "detail": exc.detail})
+                continue
+            await websocket.send_json({"type": "ack", "sent": sent})
+    except WebSocketDisconnect:
+        return
