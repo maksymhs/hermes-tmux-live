@@ -1,9 +1,10 @@
 name: tmux-live
-version: 1.1.0
+version: 1.1.1
 description: Live tmux pane viewer for the Hermes dashboard — picker, colour terminal, keyboard input and process control.
 author: maksymhs
 license: MIT
 homepage: https://github.com/maksymhs/hermes-tmux-live
 tags: [dashboard, terminal, tmux, ui]
+requires_hermes: ">=0.23.0"
 provides_tools: []
 provides_hooks: []

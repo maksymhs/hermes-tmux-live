@@ -6,6 +6,8 @@ it when you are done.
 
 [Español](README.es.md) · MIT · unofficial community plugin
 
+![tmux-live: a tmux pane in the Hermes dashboard, with ANSI colour and the terminate controls](docs/tmux-live-pane.png)
+
 ```
 ┌ tmux ───────────────────────────────────────────────────────────┐
 │ ● 2 live panes                          ● 14:32:07   [Refresh]  │
@@ -23,6 +25,8 @@ it when you are done.
 - **Pane picker** — one card per tmux pane (session / window / pane) with the
   running command, geometry and working directory. No polling of pane contents
   on the grid, so it stays cheap with many panes.
+
+  ![tmux-live picker](docs/tmux-live-picker.png)
 - **Colour terminal** — ANSI SGR rendering with 16, 256 and truecolour support,
   bold / dim / italic / underline / reverse / strikethrough. No external
   terminal library, no CDN.

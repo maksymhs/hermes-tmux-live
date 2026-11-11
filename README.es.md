@@ -6,11 +6,15 @@ cuando termines.
 
 [English](README.md) · MIT · plugin de comunidad, no oficial
 
+![tmux-live: un panel tmux dentro del dashboard de Hermes, con color ANSI y los controles de terminar](docs/tmux-live-pane.png)
+
 ## Qué hace
 
 - **Selector de paneles** — una tarjeta por panel (`sesión / ventana / panel`)
   con el comando en ejecución, el tamaño y el directorio de trabajo. La rejilla
   no captura el contenido de los paneles, así que aguanta muchas sesiones.
+
+  ![selector de tmux-live](docs/tmux-live-picker.png)
 - **Terminal con color** — render ANSI SGR con 16, 256 y truecolor, además de
   negrita, tenue, cursiva, subrayado, reverse y tachado. Sin librerías externas
   ni CDN.
