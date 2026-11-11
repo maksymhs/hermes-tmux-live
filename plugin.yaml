@@ -1,5 +1,5 @@
 name: tmux-live
-version: 1.2.1
+version: 1.2.2
 description: Live tmux pane viewer for the Hermes dashboard — server overview, colour terminal, direct keyboard input and process control.
 author: maksymhs
 license: MIT

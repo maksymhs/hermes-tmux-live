@@ -447,6 +447,8 @@ async def input_socket(websocket: WebSocket) -> None:
 
     async def stream_screen(lines: int, ansi: int) -> None:
         last_hash = ""
+        loop = asyncio.get_running_loop()
+        last_sent = loop.time()
         # Long scrollbacks cost more to capture, so slow those streams down.
         interval = _STREAM_INTERVAL if lines <= 400 else 0.2 if lines <= 800 else 0.35
         while True:
@@ -456,6 +458,11 @@ async def input_socket(websocket: WebSocket) -> None:
                     last_hash = frame["hash"]
                     meta = await run_in_threadpool(_capture_meta, target)
                     await emit({"type": "screen", **frame, **meta})
+                    last_sent = loop.time()
+                elif loop.time() - last_sent > 2.0:
+                    # Keep the client's fallback watchdog quiet while idle.
+                    await emit({"type": "screen-ping"})
+                    last_sent = loop.time()
             except asyncio.CancelledError:
                 raise
             except HTTPException as exc:

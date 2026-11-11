@@ -46,6 +46,7 @@
       typingHint: "Teclado activo — escribe directamente sobre la terminal",
       wsOn: "teclado en vivo",
       wsConnecting: "conectando teclado…",
+      connecting: "conectando con el panel…",
       terminate: "Terminar",
       killProcess: "Matar proceso",
       closePane: "Cerrar panel",
@@ -87,6 +88,7 @@
       typingHint: "Keyboard active — type directly into the terminal",
       wsOn: "keyboard live",
       wsConnecting: "connecting keyboard…",
+      connecting: "connecting to pane…",
       terminate: "Terminate",
       killProcess: "Kill process",
       closePane: "Close pane",
@@ -319,6 +321,7 @@
     const [focused, setFocused] = useState(false);
     const [sendError, setSendError] = useState(null);
     const [wsOnline, setWsOnline] = useState(false);
+    const [screenLive, setScreenLive] = useState(false);
     const [pendingKill, setPendingKill] = useState(null);
     const [killError, setKillError] = useState(null);
     const [killing, setKilling] = useState(false);
@@ -344,6 +347,7 @@
     const flushTimer = useRef(null);
     const socketRef = useRef(null);
     const queueRef = useRef([]);
+    const lastScreenRef = useRef(0);
 
     const loadPanes = useCallback(async () => {
       try {
@@ -391,9 +395,9 @@
 
     usePoll(
       useCallback(async () => {
-        if (viewRef.current !== "detail" || wsOnline) return;
+        if (viewRef.current !== "detail" || screenLive) return;
         await loadCapture();
-      }, [loadCapture, wsOnline]),
+      }, [loadCapture, screenLive]),
       1000,
     );
 
@@ -448,7 +452,10 @@
           try {
             const data = JSON.parse(event.data);
             if (!data) return;
-            if (data.type === "screen") {
+            if (data.type === "screen" || data.type === "screen-ping") {
+              lastScreenRef.current = Date.now();
+              setScreenLive(true);
+              if (data.type === "screen-ping") return;
               setDetailError(null);
               if (data.hash !== hashRef.current) {
                 setHash(data.hash);
@@ -473,6 +480,7 @@
           if (socketRef.current === socket) socketRef.current = null;
           if (disposed) return;
           setWsOnline(false);
+          setScreenLive(false);
           attempts += 1;
           retryTimer = window.setTimeout(connect, Math.min(5000, 400 * attempts));
         };
@@ -510,6 +518,17 @@
       };
       document.addEventListener("visibilitychange", onVisibility);
       return () => document.removeEventListener("visibilitychange", onVisibility);
+    }, [view]);
+
+    useEffect(() => {
+      if (view !== "detail") return undefined;
+      const timer = window.setInterval(() => {
+        if (document.hidden) return;
+        if (lastScreenRef.current && Date.now() - lastScreenRef.current > 4000) {
+          setScreenLive(false);
+        }
+      }, 1000);
+      return () => window.clearInterval(timer);
     }, [view]);
 
     useEffect(() => {
@@ -558,6 +577,8 @@
       setFollow(true);
       setSendError(null);
       setWsOnline(false);
+      setScreenLive(false);
+      lastScreenRef.current = 0;
       setPendingKill(null);
       setKillError(null);
       setManagePending(null);
@@ -978,6 +999,9 @@
                     dangerouslySetInnerHTML: { __html: html || "" },
                   }),
               !focused ? h("span", { className: "tmux-live-keyhint" }, T.focusHint) : null,
+              !updated && !detailError
+                ? h("span", { className: "tmux-live-screen-loading" }, T.connecting)
+                : null,
             ),
 
             h(

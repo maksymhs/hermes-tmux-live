@@ -101,9 +101,11 @@ tmux-live/
 While a pane is open the frontend keeps a WebSocket to the server. The server
 captures the pane about eight times a second and pushes a frame only when its
 content hash changes; the client renders the SGR sequences itself. The same
-socket carries keystrokes, and the HTTP `capture` / `send` routes remain for
-scripts and as a fallback. Nothing is bundled: React and the UI primitives come
-from the dashboard's plugin SDK, so the whole plugin is a few KB.
+socket carries keystrokes. If screen frames stop arriving (for example after a
+backend/frontend version mismatch), the client automatically falls back to HTTP
+`capture`; the HTTP `capture` / `send` routes also remain available for scripts.
+Nothing is bundled: React and the UI primitives come from the dashboard's plugin
+SDK, so the whole plugin is a few KB.
 
 ## Security
 

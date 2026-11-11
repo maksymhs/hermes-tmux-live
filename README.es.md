@@ -76,10 +76,12 @@ rm -rf ~/.hermes/plugins/tmux-live
 Mientras hay un panel abierto el frontend mantiene un WebSocket con el servidor.
 El servidor captura el panel unas ocho veces por segundo y solo envía un frame
 cuando cambia el hash del contenido; el cliente pinta las secuencias SGR él
-mismo. El mismo socket transporta las teclas, y las rutas HTTP `capture` /
-`send` siguen disponibles para scripts y como respaldo. No se empaqueta nada:
-React y los componentes vienen del SDK de plugins del dashboard, así que el
-plugin pesa unos pocos KB.
+mismo. El mismo socket transporta las teclas. Si dejan de llegar frames de
+pantalla (por ejemplo, tras un desajuste de versión entre backend y frontend),
+el cliente vuelve automáticamente a `capture` por HTTP; las rutas HTTP
+`capture` / `send` también siguen disponibles para scripts. No se empaqueta
+nada: React y los componentes vienen del SDK de plugins del dashboard, así que
+el plugin pesa unos pocos KB.
 
 ## Seguridad
 
