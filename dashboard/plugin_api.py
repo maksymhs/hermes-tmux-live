@@ -18,6 +18,7 @@ another same-user process) and caches the first socket tmux accepts.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_LINES = 2000
 _MAX_TEXT = 4000
 _TIMEOUT = 4.0
+_STREAM_INTERVAL = 0.12
 
 # Resolved on the first successful call: "" = tmux's own default socket.
 _SOCKET: str | None = None
@@ -343,17 +345,19 @@ def _group_of(pid: int) -> int:
 
 
 
-@router.get("/capture")
-def capture(
-    target: str = Query(..., description="session:window.pane"),
-    lines: int = Query(300, ge=1, le=_MAX_LINES),
-    ansi: int = Query(1, ge=0, le=1),
-) -> dict:
-    target = _check_target(target)
+def _capture_frame(target: str, lines: int, ansi: int = 1) -> dict:
     args = ["capture-pane", "-p", "-J", "-t", target, "-S", f"-{lines}"]
     if ansi:
         args.append("-e")
     text = _run(args)
+    return {
+        "target": target,
+        "text": text,
+        "hash": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest(),
+    }
+
+
+def _capture_meta(target: str) -> dict:
     meta = _run(
         [
             "display-message",
@@ -374,7 +378,7 @@ def capture(
         ]
     ).strip()
     bits = meta.split(_FIELD)
-    geometry = {
+    return {
         "cursor_x": int(bits[0]) if bits[0:1] and bits[0].isdigit() else 0,
         "cursor_y": int(bits[1]) if len(bits) > 1 and bits[1].isdigit() else 0,
         "columns": int(bits[2]) if len(bits) > 2 and bits[2].isdigit() else 0,
@@ -383,12 +387,16 @@ def capture(
         "command": bits[5] if len(bits) > 5 else "",
         "path": bits[6] if len(bits) > 6 else "",
     }
-    return {
-        "target": target,
-        "text": text,
-        "hash": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest(),
-        **geometry,
-    }
+
+
+@router.get("/capture")
+def capture(
+    target: str = Query(..., description="session:window.pane"),
+    lines: int = Query(300, ge=1, le=_MAX_LINES),
+    ansi: int = Query(1, ge=0, le=1),
+) -> dict:
+    target = _check_target(target)
+    return {**_capture_frame(target, lines, ansi), **_capture_meta(target)}
 
 
 def _send_input(target: str, text: str | None = None, key: str | None = None) -> list[str]:
@@ -417,11 +425,11 @@ def send(body: _SendBody) -> dict:
 
 @router.websocket("/ws")
 async def input_socket(websocket: WebSocket) -> None:
-    """Direct keyboard transport for the browser terminal.
+    """Bidirectional terminal socket: input plus low-latency screen frames.
 
-    The client sends ``{"text": "..."}`` for printable/pasted text and
-    ``{"key": "Enter"}`` for a key from the whitelist above. Capture still
-    travels over HTTP; only the low-latency input path uses this socket.
+    Input messages are ``{"text": "..."}`` or ``{"key": "Enter"}``. The client
+    enables screen streaming with ``{"type": "watch", "lines": 400, "ansi": 1}``
+    and can pause it with ``{"type": "unwatch"}`` while the tab is hidden.
     """
     await websocket.accept()
     try:
@@ -431,8 +439,46 @@ async def input_socket(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    await websocket.send_json({"type": "ready", "target": target})
+    send_lock = asyncio.Lock()
+
+    async def emit(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def stream_screen(lines: int, ansi: int) -> None:
+        last_hash = ""
+        # Long scrollbacks cost more to capture, so slow those streams down.
+        interval = _STREAM_INTERVAL if lines <= 400 else 0.2 if lines <= 800 else 0.35
+        while True:
+            try:
+                frame = await run_in_threadpool(_capture_frame, target, lines, ansi)
+                if frame["hash"] != last_hash:
+                    last_hash = frame["hash"]
+                    meta = await run_in_threadpool(_capture_meta, target)
+                    await emit({"type": "screen", **frame, **meta})
+            except asyncio.CancelledError:
+                raise
+            except HTTPException as exc:
+                await emit({"type": "error", "scope": "screen", "detail": exc.detail})
+            except Exception as exc:  # keep the stream alive after transient tmux errors
+                await emit({"type": "error", "scope": "screen", "detail": str(exc)})
+            await asyncio.sleep(interval)
+
+    async def stop_watch(task: asyncio.Task | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    watch_task: asyncio.Task | None = None
+    watch_key: tuple[int, int] | None = None
     try:
+        await emit({"type": "ready", "target": target})
         while True:
             raw = await websocket.receive_text()
             try:
@@ -442,27 +488,48 @@ async def input_socket(websocket: WebSocket) -> None:
             if not isinstance(payload, dict):
                 payload = {"text": str(payload)}
 
-            if payload.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+            kind = payload.get("type")
+            if kind == "ping":
+                await emit({"type": "pong"})
+                continue
+            if kind == "unwatch":
+                await stop_watch(watch_task)
+                watch_task = None
+                watch_key = None
+                continue
+            if kind == "watch":
+                try:
+                    lines = int(payload.get("lines", 300))
+                except (TypeError, ValueError):
+                    lines = 300
+                lines = max(1, min(_MAX_LINES, lines))
+                ansi = 0 if payload.get("ansi") in (0, False, "0") else 1
+                key = (lines, ansi)
+                if key != watch_key:
+                    await stop_watch(watch_task)
+                    watch_task = asyncio.create_task(stream_screen(lines, ansi))
+                    watch_key = key
                 continue
 
             text = payload.get("text")
             key = payload.get("key")
-            if text is None and payload.get("type") in (None, "input", "text"):
+            if text is None and kind in (None, "input", "text"):
                 text = payload.get("data")
             if text is not None and not isinstance(text, str):
-                await websocket.send_json({"type": "error", "detail": "text must be a string"})
+                await emit({"type": "error", "detail": "text must be a string"})
                 continue
             if key is not None and not isinstance(key, str):
-                await websocket.send_json({"type": "error", "detail": "key must be a string"})
+                await emit({"type": "error", "detail": "key must be a string"})
                 continue
             if not text and not key:
                 continue
             try:
                 sent = await run_in_threadpool(_send_input, target, text, key)
             except HTTPException as exc:
-                await websocket.send_json({"type": "error", "detail": exc.detail})
+                await emit({"type": "error", "detail": exc.detail})
                 continue
-            await websocket.send_json({"type": "ack", "sent": sent})
+            await emit({"type": "ack", "sent": sent})
     except WebSocketDisconnect:
         return
+    finally:
+        await stop_watch(watch_task)

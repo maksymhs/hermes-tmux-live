@@ -35,13 +35,8 @@
       emptyHost: "No hay sesiones tmux en este host.",
       emptyServer: "El servidor tmux no está corriendo.",
       open: "Abrir terminal →",
-      gridHint: "Elige un panel para verlo en grande, con color y teclado.",
-      overview: "Todos los terminales",
-      manageHint:
-        "Administra todos los paneles del host: abre uno para escribir en él, ciérralo o termina su sesión.",
-      sessions: (value) => value + (value === 1 ? " sesión" : " sesiones"),
-      panes: (value) => value + (value === 1 ? " panel" : " paneles"),
-      attached: (value) => value + (value === 1 ? " conectado" : " conectados"),
+      manage: "Administrar",
+      done: "Listo",
       back: "← Paneles",
       lines: (value) => value + " líneas",
       following: "Siguiendo",
@@ -66,7 +61,7 @@
       notePane: "Se cierra el panel y su proceso.",
       noteSession: "Se cierran todos los paneles de la sesión.",
       footer:
-        "Se refresca cada segundo · los colores son los del panel · escribe directamente sobre la terminal",
+        "Actualización en vivo · los colores son los del panel · escribe directamente sobre la terminal",
       captureError: "no se pudo leer el panel",
       killError: "no se pudo terminar el proceso",
       active: "activo",
@@ -81,13 +76,8 @@
       emptyHost: "No tmux sessions on this host.",
       emptyServer: "The tmux server is not running.",
       open: "Open terminal →",
-      gridHint: "Pick a pane to see it large, in colour, with keyboard input.",
-      overview: "All terminals",
-      manageHint:
-        "Manage every pane on this host: open one to type in it, close it, or terminate its session.",
-      sessions: (value) => value + (value === 1 ? " session" : " sessions"),
-      panes: (value) => value + (value === 1 ? " pane" : " panes"),
-      attached: (value) => value + (value === 1 ? " attached" : " attached"),
+      manage: "Manage",
+      done: "Done",
       back: "← Panes",
       lines: (value) => value + " lines",
       following: "Following",
@@ -112,7 +102,7 @@
       notePane: "The pane and its process are closed.",
       noteSession: "Every pane in the session is closed.",
       footer:
-        "Refreshes every second · colours come from the pane · type directly into the terminal",
+        "Live updates · colours come from the pane · type directly into the terminal",
       captureError: "cannot read the pane",
       killError: "could not terminate the process",
       active: "active",
@@ -315,6 +305,7 @@
     const [serverRunning, setServerRunning] = useState(true);
     const [gridError, setGridError] = useState(null);
     const [gridUpdated, setGridUpdated] = useState(0);
+    const [manageMode, setManageMode] = useState(false);
 
     const [target, setTarget] = useState("");
     const [text, setText] = useState("");
@@ -339,6 +330,8 @@
     viewRef.current = view;
     const targetRef = useRef(target);
     targetRef.current = target;
+    const linesRef = useRef(lines);
+    linesRef.current = lines;
     const hashRef = useRef(hash);
     hashRef.current = hash;
     const followRef = useRef(follow);
@@ -398,9 +391,9 @@
 
     usePoll(
       useCallback(async () => {
-        if (viewRef.current !== "detail") return;
+        if (viewRef.current !== "detail" || wsOnline) return;
         await loadCapture();
-      }, [loadCapture]),
+      }, [loadCapture, wsOnline]),
       1000,
     );
 
@@ -440,6 +433,13 @@
           if (disposed) return;
           setWsOnline(true);
           setSendError(null);
+          socket.send(
+            JSON.stringify({
+              type: "watch",
+              lines: Number(linesRef.current) || 400,
+              ansi: 1,
+            }),
+          );
           const pending = queueRef.current;
           queueRef.current = [];
           pending.forEach((item) => socket.send(JSON.stringify(item)));
@@ -447,7 +447,21 @@
         socket.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data && data.type === "error" && data.detail) setSendError(data.detail);
+            if (!data) return;
+            if (data.type === "screen") {
+              setDetailError(null);
+              if (data.hash !== hashRef.current) {
+                setHash(data.hash);
+                setText(data.text || "");
+                setUpdated(Date.now());
+              }
+              setMeta(data);
+              return;
+            }
+            if (data.type === "error" && data.detail) {
+              if (data.scope === "screen") setDetailError(data.detail);
+              else setSendError(data.detail);
+            }
           } catch (err) {
             /* non-JSON frames are ignored */
           }
@@ -474,6 +488,29 @@
         if (socket) socket.close();
       };
     }, [view, target]);
+
+    useEffect(() => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: "watch", lines: Number(lines) || 400, ansi: 1 }));
+    }, [lines]);
+
+    useEffect(() => {
+      if (view !== "detail") return undefined;
+      const onVisibility = () => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(
+          JSON.stringify(
+            document.hidden
+              ? { type: "unwatch" }
+              : { type: "watch", lines: Number(linesRef.current) || 400, ansi: 1 },
+          ),
+        );
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      return () => document.removeEventListener("visibilitychange", onVisibility);
+    }, [view]);
 
     useEffect(() => {
       if (view !== "detail" || !target) return undefined;
@@ -652,7 +689,7 @@
         if (event.key.length === 1) {
           event.preventDefault();
           bufferRef.current += event.key;
-          if (!flushTimer.current) flushTimer.current = window.setTimeout(flushText, 25);
+          if (!flushTimer.current) flushTimer.current = window.setTimeout(flushText, 8);
         }
       },
       [flushText, send],
@@ -682,27 +719,79 @@
      * Grid
      * ---------------------------------------------------------------- */
 
-    const sessions = useMemo(() => {
-      const grouped = new Map();
-      panes.forEach((item) => {
-        if (!grouped.has(item.session)) {
-          grouped.set(item.session, {
-            name: item.session,
-            attached: false,
-            panes: [],
-          });
-        }
-        const session = grouped.get(item.session);
-        session.panes.push(item);
-        session.attached = session.attached || item.attached;
-      });
-      return Array.from(grouped.values()).sort((a, b) => a.name.localeCompare(b.name));
-    }, [panes]);
+    const renderPaneCard = (item) => {
+      const body = [
+        h(
+          "span",
+          { className: "tmux-live-card-head", key: "head" },
+          h(
+            "span",
+            { className: "tmux-live-card-name" },
+            h(Dot, { on: item.attached }),
+            item.target,
+          ),
+          item.active ? h(Badge, { className: "tmux-live-badge" }, T.active) : null,
+        ),
+        h(
+          "span",
+          { className: "tmux-live-card-meta", key: "meta" },
+          (item.command || "?") + " · " + item.size,
+        ),
+        h("span", { className: "tmux-live-card-path", key: "path" }, shortPath(item.path)),
+        h("span", { className: "tmux-live-card-open", key: "open" }, T.open),
+      ];
 
-    const attachedCount = useMemo(
-      () => new Set(panes.filter((item) => item.attached).map((item) => item.session)).size,
-      [panes],
-    );
+      if (!manageMode) {
+        return h(
+          "button",
+          {
+            key: item.target,
+            type: "button",
+            className: "tmux-live-card",
+            onClick: () => openPane(item),
+          },
+          body,
+        );
+      }
+
+      return h(
+        "div",
+        { key: item.target, className: "tmux-live-card-wrap" },
+        h(
+          "button",
+          { type: "button", className: "tmux-live-card", onClick: () => openPane(item) },
+          body,
+        ),
+        h(
+          "div",
+          { className: "tmux-live-card-actions" },
+          h(
+            Button,
+            {
+              size: "sm",
+              outlined: true,
+              onClick: () => {
+                setManageError(null);
+                setManagePending({ target: item.target, mode: "pane" });
+              },
+            },
+            T.closePane,
+          ),
+          h(
+            Button,
+            {
+              size: "sm",
+              outlined: true,
+              onClick: () => {
+                setManageError(null);
+                setManagePending({ target: item.session, mode: "session" });
+              },
+            },
+            T.killSession,
+          ),
+        ),
+      );
+    };
 
     const grid =
       view !== "grid"
@@ -736,6 +825,19 @@
                   h(Dot, { on: !gridError && serverRunning && panes.length > 0 }),
                   gridUpdated ? new Date(gridUpdated).toLocaleTimeString() : T.waiting,
                 ),
+                h(
+                  Button,
+                  {
+                    size: "sm",
+                    outlined: !manageMode,
+                    onClick: () => {
+                      setManagePending(null);
+                      setManageError(null);
+                      setManageMode((value) => !value);
+                    },
+                  },
+                  manageMode ? T.done : T.manage,
+                ),
                 h(Button, { size: "sm", outlined: true, onClick: () => loadPanes() }, T.refresh),
               ),
             ),
@@ -752,16 +854,7 @@
                 : h(
                     React.Fragment,
                     null,
-                    h(
-                      "div",
-                      { className: "tmux-live-overview" },
-                      h("span", { className: "tmux-live-overview-title" }, T.overview),
-                      h("span", { className: "tmux-live-stat" }, T.sessions(sessions.length)),
-                      h("span", { className: "tmux-live-stat" }, T.panes(panes.length)),
-                      h("span", { className: "tmux-live-stat" }, T.attached(attachedCount)),
-                      h("span", { className: "tmux-live-overview-hint" }, T.manageHint),
-                    ),
-                    managePending
+                    manageMode && managePending
                       ? h(
                           "div",
                           { className: "tmux-live-confirm" },
@@ -798,97 +891,10 @@
                           ),
                         )
                       : null,
-                    manageError
+                    manageMode && manageError
                       ? h("div", { className: "tmux-live-error tmux-live-send-error" }, manageError)
                       : null,
-                    h(
-                      "div",
-                      { className: "tmux-live-sessions" },
-                      sessions.map((session) =>
-                        h(
-                          "section",
-                          { key: session.name, className: "tmux-live-session" },
-                          h(
-                            "div",
-                            { className: "tmux-live-session-head" },
-                            h(
-                              "div",
-                              { className: "tmux-live-session-title" },
-                              h(Dot, { on: session.attached }),
-                              h("span", { className: "tmux-live-session-name" }, session.name),
-                              h("span", { className: "tmux-live-session-meta" }, T.panes(session.panes.length)),
-                            ),
-                            h(
-                              Button,
-                              {
-                                size: "sm",
-                                outlined: true,
-                                onClick: () => {
-                                  setManageError(null);
-                                  setManagePending({ target: session.name, mode: "session" });
-                                },
-                              },
-                              T.killSession,
-                            ),
-                          ),
-                          h(
-                            "div",
-                            { className: "tmux-live-grid" },
-                            session.panes.map((item) =>
-                              h(
-                                "div",
-                                { key: item.target, className: "tmux-live-card-wrap" },
-                                h(
-                                  "button",
-                                  {
-                                    type: "button",
-                                    className: "tmux-live-card",
-                                    onClick: () => openPane(item),
-                                  },
-                                  h(
-                                    "span",
-                                    { className: "tmux-live-card-head" },
-                                    h(
-                                      "span",
-                                      { className: "tmux-live-card-name" },
-                                      h(Dot, { on: item.attached }),
-                                      item.target,
-                                    ),
-                                    item.active
-                                      ? h(Badge, { className: "tmux-live-badge" }, T.active)
-                                      : null,
-                                  ),
-                                  h(
-                                    "span",
-                                    { className: "tmux-live-card-meta" },
-                                    (item.command || "?") + " · " + item.size,
-                                  ),
-                                  h("span", { className: "tmux-live-card-path" }, shortPath(item.path)),
-                                  h("span", { className: "tmux-live-card-open" }, T.open),
-                                ),
-                                h(
-                                  "div",
-                                  { className: "tmux-live-card-actions" },
-                                  h(
-                                    Button,
-                                    {
-                                      size: "sm",
-                                      outlined: true,
-                                      onClick: () => {
-                                        setManageError(null);
-                                        setManagePending({ target: item.target, mode: "pane" });
-                                      },
-                                    },
-                                    T.closePane,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    h("p", { className: "tmux-live-foot" }, T.gridHint),
+                    h("div", { className: "tmux-live-grid" }, panes.map(renderPaneCard)),
                   ),
           );
 

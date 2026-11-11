@@ -35,10 +35,10 @@ it when you are done.
   written with `tmux send-keys`: printable text, Enter, Backspace, Tab/Shift-Tab,
   Esc, Delete/Insert, Home/End/PageUp/PageDown, F1–F12, arrows and Ctrl
   combinations. Paste is supported and the socket reconnects on its own.
-- **Server overview / management** — every pane on the host is grouped by tmux
-  session, with session/pane/attached counts, running command, geometry and
-  working directory. Open any terminal, close a pane, or kill a session from the
-  overview. All destructive actions ask for confirmation.
+- **Server overview / management** — the pane picker lists every terminal on the
+  host with its command, geometry and working directory. A compact `Manage`
+  toggle reveals per-pane close and per-session kill actions. All destructive
+  actions ask for confirmation.
 - **Scrollback** — 120 / 400 / 800 / 2000 lines, autoscroll toggle, fullscreen.
 - **Terminate** — kill the pane's foreground process (`SIGTERM` or `SIGKILL`),
   close the pane, or kill the whole session. Every action asks for confirmation.
@@ -95,13 +95,15 @@ tmux-live/
 | GET | `/api/plugins/tmux-live/panes` | sessions, windows, panes |
 | GET | `/api/plugins/tmux-live/capture?target=session:0.0&lines=400&ansi=1` | pane contents with ANSI escapes |
 | POST | `/api/plugins/tmux-live/send` | `{target, text?}` or `{target, key?}` |
-| WS | `/api/plugins/tmux-live/ws?target=session:0.0` | direct input: `{text}` / `{key}` / `{type: "ping"}` |
+| WS | `/api/plugins/tmux-live/ws?target=session:0.0` | input (`{text}` / `{key}`) and live screen frames (`{type: "watch"}`) |
 | POST | `/api/plugins/tmux-live/kill` | `{target, mode: process\|pane\|session, signal?}` |
 
-The frontend polls `capture` once a second while a pane is open and renders the
-SGR sequences itself. Keystrokes use the WebSocket for low latency; the HTTP
-`send` route remains available for scripts. Nothing is bundled: React and the UI
-primitives come from the dashboard's plugin SDK, so the whole plugin is a few KB.
+While a pane is open the frontend keeps a WebSocket to the server. The server
+captures the pane about eight times a second and pushes a frame only when its
+content hash changes; the client renders the SGR sequences itself. The same
+socket carries keystrokes, and the HTTP `capture` / `send` routes remain for
+scripts and as a fallback. Nothing is bundled: React and the UI primitives come
+from the dashboard's plugin SDK, so the whole plugin is a few KB.
 
 ## Security
 
@@ -145,8 +147,8 @@ dashboard; `node --check` catches syntax errors. After editing
 ## Limitations
 
 - The view is a **mirror**: input is sent immediately over the WebSocket, but
-  the screen refreshes once a second, so typed characters appear on the next
-  poll. It is not a PTY attachment.
+  the screen is sampled about eight times a second, so it can trail the real
+  pane by a frame. It is not a PTY attachment.
 - Attaching a real PTY client was deliberately avoided: tmux resizes a window
   for every attached client, which would change the layout of the session you
   are watching.

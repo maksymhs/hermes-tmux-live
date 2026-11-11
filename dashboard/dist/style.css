@@ -93,93 +93,6 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success, #34d399) 22%, transparent);
 }
 
-/* ---------------------------------------------------------- overview */
-
-.tmux-live-overview {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-  padding: 0.55rem 0.7rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--color-card) 88%, transparent);
-}
-
-.tmux-live-overview-title {
-  margin-right: 0.15rem;
-  font-size: 0.66rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--color-muted-foreground);
-}
-
-.tmux-live-stat {
-  padding: 0.12rem 0.45rem;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  font-size: 0.68rem;
-  color: var(--color-card-foreground);
-  background: color-mix(in srgb, var(--color-primary) 7%, transparent);
-  white-space: nowrap;
-}
-
-.tmux-live-overview-hint {
-  flex: 1 1 260px;
-  min-width: 0;
-  font-size: 0.7rem;
-  color: var(--color-muted-foreground);
-  text-align: right;
-}
-
-/* ----------------------------------------------------------- sessions */
-
-.tmux-live-sessions {
-  display: flex;
-  flex-direction: column;
-  gap: 0.8rem;
-}
-
-.tmux-live-session {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  padding: 0.6rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--color-card) 82%, transparent);
-}
-
-.tmux-live-session-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.tmux-live-session-title {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
-}
-
-.tmux-live-session-name {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.85rem;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tmux-live-session-meta {
-  font-size: 0.68rem;
-  color: var(--color-muted-foreground);
-  white-space: nowrap;
-}
-
 /* -------------------------------------------------------------- grid */
 
 .tmux-live-grid {
@@ -452,9 +365,5 @@
   }
   .tmux-live-grid {
     grid-template-columns: 1fr;
-  }
-  .tmux-live-overview-hint {
-    flex-basis: 100%;
-    text-align: left;
   }
 }
