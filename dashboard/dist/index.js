@@ -420,10 +420,15 @@
       let retryTimer = null;
       let attempts = 0;
 
-      const connect = () => {
-        const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const url =
-          scheme + "//" + window.location.host + API + "/ws?target=" + encodeURIComponent(target);
+      const connect = async () => {
+        let url;
+        if (typeof SDK.buildWsUrl === "function") {
+          url = await SDK.buildWsUrl(API + "/ws", { target });
+        } else {
+          const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+          url = scheme + "//" + window.location.host + API + "/ws?target=" + encodeURIComponent(target);
+        }
+        if (disposed) return;
         let socket;
         try {
           socket = new WebSocket(url);

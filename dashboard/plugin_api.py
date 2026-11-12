@@ -88,6 +88,16 @@ _ALLOWED_KEYS = {
     f"F{number}" for number in range(1, 13)
 }
 
+
+def _ws_upgrade_authorized(ws: WebSocket) -> bool:
+    """Authorize a WS upgrade via the dashboard's canonical gate (?token= / ?ticket= / ?internal=); accepts when the dashboard isn't importable (bare-FastAPI test harness)."""
+    try:
+        from hermes_cli import web_server_chat as _ws
+    except Exception:
+        return True
+    return bool(_ws._ws_auth_ok(ws))
+
+
 _PANE_FORMAT = _FIELD.join(
     (
         "#{session_name}",
@@ -431,6 +441,9 @@ async def input_socket(websocket: WebSocket) -> None:
     enables screen streaming with ``{"type": "watch", "lines": 400, "ansi": 1}``
     and can pause it with ``{"type": "unwatch"}`` while the tab is hidden.
     """
+    if not _ws_upgrade_authorized(websocket):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     try:
         target = _check_target(websocket.query_params.get("target") or "")
